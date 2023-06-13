@@ -745,12 +745,12 @@ mod tests {
     use crate::msg::ContractInfo;
 
     #[test]
-    fn decimal_new() {
+    fn rewards_calc() {
         //rounding issue makes 1369500000 > 1369499999
-        let mut expected = Uint128::from(1369499999u128);
+        let mut expected = Uint128::from(13694999u128);
         let mut staked: Staked = {
             Staked {
-                staked_amount: Uint128::from(502000000u128),
+                staked_amount: Uint128::from(1u128),
                 last_claimed_date: None,
                 last_staked_date: Some(1686588696),
             }
@@ -777,18 +777,16 @@ mod tests {
                     }
                 },
                 viewing_key: None,
-                total_staked_amount: Uint128::from(1004000000u128),
+                total_staked_amount: Uint128::from(200u128),
                 total_rewards: Uint128::from(10000000000000u128),
             }
         };
         let x = get_estimated_rewards(&staked, &current_time, &state);
         assert_eq!(x.unwrap(), expected);
 
-        staked.staked_amount = Uint128::from(331320000u128);
-        expected = Uint128::from(903869999u128);
+        staked.staked_amount = Uint128::from(100u128);
+        expected = Uint128::from(1369499999u128);
         let y = get_estimated_rewards(&staked, &current_time, &state);
         assert_eq!(y.unwrap(), expected);
-
-        //2.997014925373134
     }
 }
