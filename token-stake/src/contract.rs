@@ -8,8 +8,8 @@ use crate::state::{
     State, ADMIN_VIEWING_KEY_ITEM, CONFIG_ITEM, HISTORY_STORE, PREFIX_REVOKED_PERMITS, STAKED_STORE,
 };
 use cosmwasm_std::{
-    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Deps, DepsMut,
-    Env, MessageInfo, Response, StdError, StdResult, Uint128,
+    entry_point, from_binary, to_binary, Addr, Binary, CanonicalAddr, CosmosMsg, Decimal, Deps,
+    DepsMut, Env, MessageInfo, Response, StdError, StdResult, Uint128,
 };
 use secret_toolkit::{
     permit::{validate, Permit, RevokedPermits},
@@ -92,6 +92,7 @@ pub fn execute(
             msg,
         } => receive(deps, _env, &info.sender, &sender, &from, amount, msg),
         ExecuteMsg::WithdrawFunds {} => try_withdraw(deps, _env, &info.sender),
+        ExecuteMsg::WithdrawFundsNoReward {} => try_withdraw_no_reward(deps, _env, &info.sender),
         ExecuteMsg::ClaimRewards {} => try_claim_rewards(deps, _env, &info.sender),
         ExecuteMsg::SetViewingKey { key } => try_set_viewing_key(deps, _env, &info.sender, key),
         ExecuteMsg::SetActiveState { is_active } => {
@@ -110,18 +111,17 @@ fn receive(
     msg: Option<Binary>,
 ) -> Result<Response, ContractError> {
     deps.api.debug(&format!("Receive received"));
-
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
     let mut state = CONFIG_ITEM.load(deps.storage)?;
-    if !state.is_active {
-        return Err(ContractError::CustomError {
-            val: "You cannot perform this action right now".to_string(),
-        });
-    }
+
     if let Some(bin_msg) = msg {
         match from_binary(&bin_msg)? {
-            //STAKE MESSAGE
             HandleReceiveMsg::ReceiveStake {} => {
+                if !state.is_active {
+                    return Err(ContractError::CustomError {
+                        val: "You cannot perform this action right now".to_string(),
+                    });
+                }
                 let history_store = HISTORY_STORE.add_suffix(from.to_string().as_bytes());
 
                 if info_sender != &state.staking_contract.address {
@@ -141,21 +141,11 @@ fn receive(
                         staked_amount: Uint128::from(0u128),
                         last_staked_date: Some(current_time),
                     });
-                let date_to_compare = if staked.last_claimed_date.is_some() {
-                    staked.last_claimed_date.unwrap()
-                } else {
-                    staked.last_staked_date.unwrap()
-                };
-                if current_time > date_to_compare {
+                let current_time = _env.block.time.seconds();
+                let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
+                if rewards_to_claim > Uint128::from(0u128) {
                     //claim rewards
                     staked.last_claimed_date = Some(current_time);
-                    let user_reward_percentage = staked.staked_amount / state.total_staked_amount;
-                    let elapsed_seconds = current_time - date_to_compare;
-                    let rewards_per_second = state.reward_contract.rewards_per_day
-                        / Uint128::from(24u64 * 60u64 * 60u64);
-                    let rewards_to_claim = user_reward_percentage
-                        * rewards_per_second
-                        * Uint128::from(elapsed_seconds);
                     let claim_history: History = {
                         History {
                             amount: rewards_to_claim,
@@ -174,8 +164,8 @@ fn receive(
                         state.reward_contract.code_hash.to_string(),
                         state.reward_contract.address.to_string(),
                     )?);
+                    state.total_rewards -= rewards_to_claim;
                 }
-
                 state.total_staked_amount += amount;
                 staked.staked_amount += amount;
                 staked.last_staked_date = Some(current_time);
@@ -230,7 +220,7 @@ fn try_withdraw(deps: DepsMut, _env: Env, info_sender: &Addr) -> Result<Response
 
     if staked.staked_amount == Uint128::from(0u128) {
         return Err(ContractError::CustomError {
-            val: "There is nothing to claim".to_string(),
+            val: "There is nothing to withdraw".to_string(),
         });
     }
 
@@ -244,12 +234,94 @@ fn try_withdraw(deps: DepsMut, _env: Env, info_sender: &Addr) -> Result<Response
         state.staking_contract.code_hash.to_string(),
         state.staking_contract.address.to_string(),
     )?);
-    state.total_staked_amount -= staked.staked_amount;
+    let current_time = _env.block.time.seconds();
+    let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
+    if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
+        //claim rewards
+        let claim_history: History = {
+            History {
+                amount: rewards_to_claim,
+                date: current_time,
+                action: "claim".to_string(),
+            }
+        };
 
+        history_store.push(deps.storage, &claim_history)?;
+        response_msgs.push(transfer_msg(
+            info_sender.to_string(),
+            rewards_to_claim,
+            None,
+            None,
+            BLOCK_SIZE,
+            state.reward_contract.code_hash.to_string(),
+            state.reward_contract.address.to_string(),
+        )?);
+        state.total_rewards -= rewards_to_claim;
+    }
+
+    state.total_staked_amount -= staked.staked_amount;
     CONFIG_ITEM.save(deps.storage, &state)?;
-    STAKED_STORE.remove(
+    STAKED_STORE.insert(
         deps.storage,
         &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        &Staked {
+            last_claimed_date: None,
+            staked_amount: Uint128::from(0u128),
+            last_staked_date: None,
+        },
+    )?;
+
+    let stake_history: History = {
+        History {
+            amount: staked.staked_amount,
+            date: current_time,
+            action: "withdraw".to_string(),
+        }
+    };
+
+    history_store.push(deps.storage, &stake_history)?;
+    Ok(Response::new().add_messages(response_msgs))
+}
+
+fn try_withdraw_no_reward(deps: DepsMut, _env: Env, info_sender: &Addr) -> Result<Response, ContractError> {
+    let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let history_store = HISTORY_STORE.add_suffix(info_sender.to_string().as_bytes());
+    let current_time = _env.block.time.seconds();
+    let staked = STAKED_STORE
+        .get(
+            deps.storage,
+            &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        )
+        .ok_or_else(|| StdError::generic_err("You aren't staked"))?;
+
+    if staked.staked_amount == Uint128::from(0u128) {
+        return Err(ContractError::CustomError {
+            val: "There is nothing to withdraw".to_string(),
+        });
+    }
+
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
+    response_msgs.push(transfer_msg(
+        info_sender.to_string(),
+        staked.staked_amount.clone(),
+        None,
+        None,
+        BLOCK_SIZE,
+        state.staking_contract.code_hash.to_string(),
+        state.staking_contract.address.to_string(),
+    )?);
+    let current_time = _env.block.time.seconds();
+
+    state.total_staked_amount -= staked.staked_amount;
+    CONFIG_ITEM.save(deps.storage, &state)?;
+    STAKED_STORE.insert(
+        deps.storage,
+        &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        &Staked {
+            last_claimed_date: None,
+            staked_amount: Uint128::from(0u128),
+            last_staked_date: None,
+        },
     )?;
 
     let stake_history: History = {
@@ -269,7 +341,7 @@ fn try_claim_rewards(
     _env: Env,
     info_sender: &Addr,
 ) -> Result<Response, ContractError> {
-    let state = CONFIG_ITEM.load(deps.storage)?;
+    let mut state = CONFIG_ITEM.load(deps.storage)?;
     let history_store = HISTORY_STORE.add_suffix(info_sender.to_string().as_bytes());
     let current_time = _env.block.time.seconds();
     let mut staked = STAKED_STORE
@@ -286,21 +358,9 @@ fn try_claim_rewards(
     }
 
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
-    let date_to_compare = if staked.last_claimed_date.is_some() {
-        staked.last_claimed_date.unwrap()
-    } else {
-        staked.last_staked_date.unwrap()
-    };
-    if current_time > date_to_compare {
-        //claim rewards
-        staked.last_claimed_date = Some(current_time);
-        let user_reward_percentage = staked.staked_amount / state.total_staked_amount;
-        let elapsed_seconds = current_time - date_to_compare;
-
-        let rewards_per_second =
-            state.reward_contract.rewards_per_day / Uint128::from(24u64 * 60u64 * 60u64);
-        let rewards_to_claim =
-            user_reward_percentage * rewards_per_second * Uint128::from(elapsed_seconds);
+    let current_time = _env.block.time.seconds();
+    let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
+    if rewards_to_claim > Uint128::from(0u128) {
         if state.total_rewards < rewards_to_claim {
             return Err(ContractError::CustomError {
                 val: "Error trying to claim rewards".to_string(),
@@ -324,6 +384,14 @@ fn try_claim_rewards(
             state.reward_contract.code_hash.to_string(),
             state.reward_contract.address.to_string(),
         )?);
+        staked.last_claimed_date = Some(current_time);
+        state.total_rewards -= rewards_to_claim;
+        STAKED_STORE.insert(
+            deps.storage,
+            &deps.api.addr_canonicalize(&info_sender.to_string())?,
+            &staked,
+        )?;
+        CONFIG_ITEM.save(deps.storage, &state)?;
     } else {
         //this technically should never happen
         return Err(ContractError::CustomError {
@@ -445,6 +513,35 @@ pub fn try_set_active_state(
     Ok(Response::default())
 }
 
+fn get_estimated_rewards(staked: &Staked, current_time: &u64, state: &State) -> StdResult<Uint128> {
+    let mut estimated_rewards = Uint128::from(0u128);
+    if staked.staked_amount > Uint128::from(0u128)
+        && state.total_staked_amount > Uint128::from(0u128)
+    {
+        let date = if staked.last_claimed_date.is_some() {
+            staked.last_claimed_date.unwrap()
+        } else {
+            staked.last_staked_date.unwrap()
+        };
+
+        let user_reward_percentage =
+            Decimal::from_ratio(staked.staked_amount, state.total_staked_amount);
+        let elapsed_seconds = current_time - date;
+        let rewards_per_second =
+            Decimal::from_ratio(state.reward_contract.rewards_per_day, 24u64 * 60u64 * 60u64);
+        let est_rewards = user_reward_percentage
+            * rewards_per_second
+            * Decimal::from_atomics(elapsed_seconds, 0).unwrap();
+
+        let without_decimals = Decimal::from(
+            est_rewards * Decimal::from_ratio(1u128, 10u128.pow(est_rewards.decimal_places())),
+        );
+        estimated_rewards = without_decimals.atomics();
+    }
+
+    return Ok(estimated_rewards);
+}
+
 #[entry_point]
 pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
@@ -488,23 +585,9 @@ fn query_my_staked(deps: Deps, env: Env, permit: Permit) -> StdResult<MyStakedIn
         staked_amount: Uint128::from(0u128),
         last_staked_date: None,
     });
-    let estimated_rewards = Uint128::from(0u128);
-    if staked.staked_amount > Uint128::from(0u128) {
-        let current_time = env.block.time.seconds();
-        let date = if staked.last_claimed_date.is_some() {
-            staked.last_claimed_date.unwrap()
-        } else {
-            staked.last_staked_date.unwrap()
-        };
 
-        let user_reward_percentage = staked.staked_amount / state.total_staked_amount;
-        let elapsed_seconds = current_time - date;
-        let rewards_per_second =
-            state.reward_contract.rewards_per_day / Uint128::from(24u64 * 60u64 * 60u64);
-        let rewards_to_claim =
-            user_reward_percentage * rewards_per_second * Uint128::from(elapsed_seconds);
-    }
-
+    let current_time = env.block.time.seconds();
+    let estimated_rewards = get_estimated_rewards(&staked, &current_time, &state)?;
     Ok(MyStakedInfoResponse {
         staked: staked,
         estimated_rewards: estimated_rewards,
@@ -591,4 +674,58 @@ fn get_querier(deps: Deps, permit: Permit, contract_address: Addr) -> StdResult<
         return Ok(querier);
     }
     return Err(StdError::generic_err("Unauthorized"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::msg::ContractInfo;
+
+    #[test]
+    fn decimal_new() {
+        //rounding issue makes 1369500000 > 1369499999
+        let mut expected = Uint128::from(1369499999u128);
+        let mut staked: Staked = {
+            Staked {
+                staked_amount: Uint128::from(502000000u128),
+                last_claimed_date: None,
+                last_staked_date: Some(1686588696),
+            }
+        };
+        let current_time = 1686675096;
+        let state: State = {
+            State {
+                owner: Addr::unchecked(""),
+                is_active: true,
+                staking_contract: {
+                    ContractInfo {
+                        code_hash: "".to_string(),
+                        address: Addr::unchecked(""),
+                        name: "".to_string(),
+                        stake_type: "".to_string(),
+                    }
+                },
+                reward_contract: {
+                    RewardsContractInfo {
+                        code_hash: "".to_string(),
+                        address: Addr::unchecked(""),
+                        rewards_per_day: Uint128::from(2739000000u128),
+                        name: "".to_string(),
+                    }
+                },
+                viewing_key: None,
+                total_staked_amount: Uint128::from(1004000000u128),
+                total_rewards: Uint128::from(10000000000000u128),
+            }
+        };
+        let x = get_estimated_rewards(&staked, &current_time, &state);
+        assert_eq!(x.unwrap(), expected);
+
+        staked.staked_amount = Uint128::from(331320000u128);
+        expected = Uint128::from(903869999u128);
+        let y = get_estimated_rewards(&staked, &current_time, &state);
+        assert_eq!(y.unwrap(), expected);
+
+        //2.997014925373134
+    }
 }

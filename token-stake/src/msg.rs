@@ -15,6 +15,7 @@ pub struct ContractInfo {
     pub code_hash: String,
     pub address: Addr,
     pub name: String,
+    pub stake_type: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -52,6 +53,7 @@ pub enum ExecuteMsg {
         msg: Option<Binary>,
     },
     WithdrawFunds {},
+    WithdrawFundsNoReward {},
     ClaimRewards {},
     UpdateRewardContract {
         contract: RewardsContractInfo,
