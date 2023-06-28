@@ -30,4 +30,5 @@ pub struct State {
     pub viewing_key: Option<String>,
     pub total_staked_amount: Uint128,
     pub total_rewards: Uint128,
+    pub trait_restriction: Option<String>
 }

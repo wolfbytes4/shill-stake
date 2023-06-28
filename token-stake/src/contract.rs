@@ -143,7 +143,7 @@ fn receive(
                     });
                 let current_time = _env.block.time.seconds();
                 let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
-                if rewards_to_claim > Uint128::from(0u128) {
+                if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
                     //claim rewards
                     staked.last_claimed_date = Some(current_time);
                     let claim_history: History = {
@@ -573,6 +573,7 @@ fn query_staked(deps: Deps) -> StdResult<StakedInfoResponse> {
         total_rewards: state.total_rewards,
         staking_contract: state.staking_contract,
         reward_contract: state.reward_contract,
+        trait_restriction: None
     })
 }
 

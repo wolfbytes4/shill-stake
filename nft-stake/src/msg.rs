@@ -8,6 +8,7 @@ pub struct InstantiateMsg {
     pub entropy: String,
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
+    pub trait_restriction: Option<String>
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -46,6 +47,12 @@ pub enum ExecuteMsg {
     RevokePermit {
         permit_name: String,
     }, 
+    Receive {
+        sender: Addr,
+        from: Addr,
+        amount: Uint128,
+        msg: Option<Binary>,
+    },
     BatchReceiveNft{
         from: Addr, 
         token_ids: Vec<String>,
@@ -68,8 +75,7 @@ pub enum ExecuteMsg {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum HandleReceiveMsg {
-    ReceiveStake {},
+pub enum HandleReceiveMsg { 
     ReceiveRewards {},
 }
 
@@ -102,6 +108,7 @@ pub struct StakedInfoResponse {
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
     pub total_rewards: Uint128,
+    pub trait_restriction: Option<String>
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

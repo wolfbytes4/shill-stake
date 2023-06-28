@@ -15,7 +15,7 @@ use secret_toolkit::{
     permit::{validate, Permit, RevokedPermits},
     snip20::{balance_query, set_viewing_key_msg, transfer_msg, Balance},
     snip721::{
-        batch_transfer_nft_msg, register_receive_nft_msg, ViewerInfo, Transfer
+        batch_transfer_nft_msg, register_receive_nft_msg, nft_dossier_query, NftDossier, ViewerInfo, Transfer
     },
 };
 
@@ -41,6 +41,7 @@ pub fn instantiate(
         total_staked_amount: Uint128::from(0u128),
         total_rewards: Uint128::from(0u128),
         is_active: true,
+        trait_restriction: msg.trait_restriction
     };
 
     //Save Contract state
@@ -99,6 +100,12 @@ pub fn execute(
         ExecuteMsg::BatchReceiveNft { from, token_ids, msg } => {
             try_batch_receive(deps, _env, &info.sender, &from, token_ids, msg)
         },
+        ExecuteMsg::Receive {
+            sender,
+            from,
+            amount,
+            msg,
+        } => receive(deps, _env, &info.sender, &sender, &from, amount, msg),
         ExecuteMsg::WithdrawFunds {} => try_withdraw(deps, _env, &info.sender),
         ExecuteMsg::WithdrawFundsNoReward {} => try_withdraw_no_reward(deps, _env, &info.sender),
         ExecuteMsg::ClaimRewards {} => try_claim_rewards(deps, _env, &info.sender),
@@ -108,7 +115,41 @@ pub fn execute(
         }
     }
 }
-// TODO: Change this to receive nfts
+fn receive(
+    deps: DepsMut,
+    _env: Env,
+    info_sender: &Addr, //snip contract
+    sender: &Addr,      //for snip 20 sender and from are the same. Wth??
+    from: &Addr,        //user
+    amount: Uint128,
+    msg: Option<Binary>,
+) -> Result<Response, ContractError> {
+    deps.api.debug(&format!("Receive received"));
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
+    let mut state = CONFIG_ITEM.load(deps.storage)?;
+
+    if let Some(bin_msg) = msg {
+        match from_binary(&bin_msg)? {
+            HandleReceiveMsg::ReceiveRewards {} => {
+                if info_sender != &state.reward_contract.address {
+                    return Err(ContractError::CustomError {
+                        val: info_sender.to_string()
+                            + &" Address is not correct reward snip contract".to_string(),
+                    });
+                }
+                state.total_rewards += amount;
+
+                CONFIG_ITEM.save(deps.storage, &state)?;
+            }
+        }
+    } else {
+        return Err(ContractError::CustomError {
+            val: "data should be given".to_string(),
+        });
+    }
+
+    Ok(Response::new().add_messages(response_msgs))
+}
 fn try_batch_receive(
     deps: DepsMut,
     _env: Env,
@@ -121,7 +162,6 @@ fn try_batch_receive(
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
     let mut state = CONFIG_ITEM.load(deps.storage)?;
  
-            
     if !state.is_active {
         return Err(ContractError::CustomError {
             val: "You cannot perform this action right now".to_string(),
@@ -155,13 +195,29 @@ fn try_batch_receive(
         .unwrap_or(Vec::new());
 
         for id in token_ids.iter() {
+            if state.trait_restriction.is_some(){
+                 let meta: NftDossier =  nft_dossier_query(
+                    deps.querier,
+                    id.to_string(),
+                    None,
+                    None,
+                    BLOCK_SIZE,
+                    state.staking_contract.code_hash.clone(),
+                    state.staking_contract.address.to_string()
+                )?;
+                let trait_to_check = state.trait_restriction.as_ref().unwrap();
+                let restricted_trait = meta.public_metadata.as_ref().unwrap().extension.as_ref().unwrap().attributes.as_ref().unwrap().iter().find(|&x| x.trait_type == Some(trait_to_check.to_string()));
+                if restricted_trait.is_none(){
+                    return Err(ContractError::CustomError {val: "This NFT does not meet the requirements".to_string()});  
+                } 
+            }
             staked_nfts.push(id.to_string());
         }
 
         let current_time = _env.block.time.seconds();
         let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
 
-        if rewards_to_claim > Uint128::from(0u128) {
+        if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
             //claim rewards
             staked.last_claimed_date = Some(current_time);
             let claim_history: History = {
@@ -636,6 +692,7 @@ fn query_staked(deps: Deps) -> StdResult<StakedInfoResponse> {
         total_rewards: state.total_rewards,
         staking_contract: state.staking_contract,
         reward_contract: state.reward_contract,
+        trait_restriction: state.trait_restriction
     })
 }
 

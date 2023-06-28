@@ -103,6 +103,7 @@ pub struct StakedInfoResponse {
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
     pub total_rewards: Uint128,
+    pub trait_restriction: Option<String>
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
