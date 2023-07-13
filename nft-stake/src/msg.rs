@@ -59,7 +59,11 @@ pub enum ExecuteMsg {
         msg: Option<Binary>
     },
     WithdrawFunds {},
+    WithdrawFundsWithQuantity {
+        quantity: Uint128
+    },
     WithdrawFundsNoReward {},
+    Eject {staker: Addr},
     ClaimRewards {},
     UpdateRewardContract {
         contract: RewardsContractInfo,

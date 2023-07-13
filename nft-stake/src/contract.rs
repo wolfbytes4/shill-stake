@@ -107,12 +107,14 @@ pub fn execute(
             msg,
         } => receive(deps, _env, &info.sender, &sender, &from, amount, msg),
         ExecuteMsg::WithdrawFunds {} => try_withdraw(deps, _env, &info.sender),
+        ExecuteMsg::WithdrawFundsWithQuantity { quantity } => try_withdraw_with_quantity(deps, _env, &info.sender, quantity),
         ExecuteMsg::WithdrawFundsNoReward {} => try_withdraw_no_reward(deps, _env, &info.sender),
         ExecuteMsg::ClaimRewards {} => try_claim_rewards(deps, _env, &info.sender),
         ExecuteMsg::SetViewingKey { key } => try_set_viewing_key(deps, _env, &info.sender, key),
         ExecuteMsg::SetActiveState { is_active } => {
             try_set_active_state(deps, _env, &info.sender, is_active)
-        }
+        }, 
+        ExecuteMsg::Eject {staker} => try_eject(deps, _env, &info.sender, &staker),
     }
 }
 fn receive(
@@ -268,6 +270,122 @@ fn try_batch_receive(
         history_store.push(deps.storage, &stake_history)?;
             
 
+    Ok(Response::new().add_messages(response_msgs))
+}
+
+fn try_withdraw_with_quantity(deps: DepsMut, _env: Env, info_sender: &Addr, quantity: Uint128) -> Result<Response, ContractError> {
+    let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let history_store = HISTORY_STORE.add_suffix(info_sender.to_string().as_bytes());
+    let current_time = _env.block.time.seconds();
+    let staked = STAKED_STORE
+        .get(
+            deps.storage,
+            &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        )
+        .ok_or_else(|| StdError::generic_err("You aren't staked"))?;
+    
+    let mut staked_nfts = STAKED_NFTS_STORE
+        .get(
+            deps.storage,
+            &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        )
+        .ok_or_else(|| StdError::generic_err("NFTs aren't staked"))?;
+        
+    if staked.staked_amount == Uint128::from(0u128) {
+        return Err(ContractError::CustomError {
+            val: "There is nothing to withdraw".to_string(),
+        });
+    }
+
+    if staked_nfts.len() == 0{
+        return Err(ContractError::CustomError {
+            val: "There are no NFTs to withdraw".to_string(),
+        });
+    }
+
+
+    if Uint128::from(staked_nfts.len() as u128) < quantity{
+        return Err(ContractError::CustomError {
+            val: "You are trying to withdraw more than is staked".to_string(),
+        });
+    }
+
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new(); 
+    let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
+    if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
+        //claim rewards
+        let claim_history: History = {
+            History {
+                amount: rewards_to_claim,
+                date: current_time,
+                action: "claim".to_string(),
+            }
+        };
+
+        history_store.push(deps.storage, &claim_history)?; 
+        response_msgs.push(transfer_msg(
+            info_sender.to_string(),
+            rewards_to_claim,
+            None,
+            None,
+            BLOCK_SIZE,
+            state.reward_contract.code_hash.to_string(),
+            state.reward_contract.address.to_string(),
+        )?);
+        state.total_rewards -= rewards_to_claim;
+    }
+    //QUANTITY LOGIC
+    let staked_nfts_leftover = staked_nfts.split_off(quantity.u128() as usize);
+    let staked_nfts_leftover_len = Uint128::from(staked_nfts_leftover.len() as u128);
+    state.total_staked_amount -= quantity;
+
+    let mut transfers: Vec<Transfer> = Vec::new();
+        transfers.push(
+            Transfer{
+                recipient: info_sender.to_string(),
+                token_ids: staked_nfts,
+                memo: None
+            }
+        );
+
+        let cosmos_batch_msg = batch_transfer_nft_msg(
+            transfers,
+            None,
+            BLOCK_SIZE,
+            state.staking_contract.code_hash.clone(),
+            state.staking_contract.address.to_string(),
+        )?;
+        response_msgs.push(cosmos_batch_msg); 
+        CONFIG_ITEM.save(deps.storage, &state)?;
+        STAKED_STORE.insert(
+            deps.storage,
+            &deps.api.addr_canonicalize(&info_sender.to_string())?,
+            &Staked {
+                last_claimed_date: None,
+                staked_amount: Uint128::from(staked_nfts_leftover.len() as u128),
+                last_staked_date: if staked_nfts_leftover.len() > 0 {
+                    Some(current_time)
+                } else {
+                    None
+                }
+            },
+        )?;
+
+    STAKED_NFTS_STORE.insert(
+        deps.storage,
+        &deps.api.addr_canonicalize(&info_sender.to_string())?,
+        &staked_nfts_leftover
+    )?;
+     
+    let stake_history: History = {
+        History {
+            amount: staked_nfts_leftover_len,
+            date: current_time,
+            action: "withdraw".to_string(),
+        }
+    };
+
+    history_store.push(deps.storage, &stake_history)?;
     Ok(Response::new().add_messages(response_msgs))
 }
 
@@ -625,11 +743,95 @@ pub fn try_set_active_state(
 ) -> Result<Response, ContractError> {
     let mut state = CONFIG_ITEM.load(deps.storage)?;
 
+    if sender.clone() != state.owner {
+        return Err(ContractError::CustomError {
+            val: "You don't have the permissions to execute this command".to_string(),
+        });
+    }
     state.is_active = is_active;
 
     CONFIG_ITEM.save(deps.storage, &state)?;
 
     Ok(Response::default())
+}
+
+pub fn try_eject(
+    deps: DepsMut,
+    _env: Env,
+    sender: &Addr,
+    staker: &Addr
+) -> Result<Response, ContractError> {
+    let mut state = CONFIG_ITEM.load(deps.storage)?;
+    if sender.clone() != state.owner {
+        return Err(ContractError::CustomError {
+            val: "You don't have the permissions to execute this command".to_string(),
+        });
+    }
+     
+    let history_store = HISTORY_STORE.add_suffix(staker.to_string().as_bytes());
+    let current_time = _env.block.time.seconds();
+    let staked_nfts = STAKED_NFTS_STORE
+        .get(
+            deps.storage,
+            &deps.api.addr_canonicalize(&staker.to_string())?,
+        )
+        .ok_or_else(|| StdError::generic_err("NFTs aren't staked"))?;
+
+    if staked_nfts.len() == 0{
+        return Err(ContractError::CustomError {
+            val: "There are no NFTs to withdraw".to_string(),
+        });
+    }
+
+    let staked_nfts_len = Uint128::from(staked_nfts.len() as u128);
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
+    let mut transfers: Vec<Transfer> = Vec::new();
+    transfers.push(
+        Transfer{
+            recipient: staker.to_string(),
+            token_ids: staked_nfts,
+            memo: None
+        }
+    );
+
+    let cosmos_batch_msg = batch_transfer_nft_msg(
+        transfers,
+        None,
+        BLOCK_SIZE,
+        state.staking_contract.code_hash.clone(),
+        state.staking_contract.address.to_string(),
+    )?;
+    response_msgs.push(cosmos_batch_msg);  
+
+    state.total_staked_amount -= staked_nfts_len;
+    CONFIG_ITEM.save(deps.storage, &state)?;
+    STAKED_STORE.insert(
+        deps.storage,
+        &deps.api.addr_canonicalize(&staker.to_string())?,
+        &Staked {
+            last_claimed_date: None,
+            staked_amount: Uint128::from(0u128),
+            last_staked_date: None,
+        },
+    )?;
+
+    STAKED_NFTS_STORE.insert(
+        deps.storage,
+        &deps.api.addr_canonicalize(&staker.to_string())?,
+        &Vec::new()
+    )?;
+
+    let stake_history: History = {
+        History {
+            amount: staked_nfts_len,
+            date: current_time,
+            action: "withdraw".to_string(),
+        }
+    };
+
+    history_store.push(deps.storage, &stake_history)?;
+    Ok(Response::new().add_messages(response_msgs))
+
 }
 
 fn get_estimated_rewards(staked: &Staked, current_time: &u64, state: &State) -> StdResult<Uint128> {
