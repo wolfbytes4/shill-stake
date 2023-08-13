@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::msg::{ContractInfo, History, RewardsContractInfo, Staked};
+use crate::msg::{ContractInfo, History, RewardsContractInfo, Staked, StakingWeight};
 use cosmwasm_std::{Addr, CanonicalAddr, Uint128};
 use secret_toolkit::{
     snip721::ViewerInfo,
@@ -30,5 +30,6 @@ pub struct State {
     pub viewing_key: Option<String>,
     pub total_staked_amount: Uint128,
     pub total_rewards: Uint128,
-    pub trait_restriction: Option<String>
+    pub trait_restriction: Option<String>,
+    pub staking_weights: Option<Vec<StakingWeight>>,
 }

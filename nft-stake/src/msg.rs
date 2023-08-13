@@ -8,7 +8,8 @@ pub struct InstantiateMsg {
     pub entropy: String,
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
-    pub trait_restriction: Option<String>
+    pub trait_restriction: Option<String>,
+    pub staking_weights: Option<Vec<StakingWeight>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -32,6 +33,20 @@ pub struct Staked {
     pub staked_amount: Uint128,
     pub last_claimed_date: Option<u64>,
     pub last_staked_date: Option<u64>,
+    pub staking_weights: Option<Vec<UserStakingWeight>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct StakingWeight {
+    pub amount: Uint128,
+    pub weight_trait_type: String,
+    pub weight_percentage: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct UserStakingWeight {
+    pub amount: Uint128,
+    pub weight_trait_type: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -46,24 +61,26 @@ pub struct History {
 pub enum ExecuteMsg {
     RevokePermit {
         permit_name: String,
-    }, 
+    },
     Receive {
         sender: Addr,
         from: Addr,
         amount: Uint128,
         msg: Option<Binary>,
     },
-    BatchReceiveNft{
-        from: Addr, 
+    BatchReceiveNft {
+        from: Addr,
         token_ids: Vec<String>,
-        msg: Option<Binary>
+        msg: Option<Binary>,
     },
     WithdrawFunds {},
     WithdrawFundsWithQuantity {
-        quantity: Uint128
+        quantity: Uint128,
     },
     WithdrawFundsNoReward {},
-    Eject {staker: Addr},
+    Eject {
+        staker: Addr,
+    },
     ClaimRewards {},
     UpdateRewardContract {
         contract: RewardsContractInfo,
@@ -79,7 +96,7 @@ pub enum ExecuteMsg {
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum HandleReceiveMsg { 
+pub enum HandleReceiveMsg {
     ReceiveRewards {},
 }
 
@@ -112,7 +129,8 @@ pub struct StakedInfoResponse {
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
     pub total_rewards: Uint128,
-    pub trait_restriction: Option<String>
+    pub trait_restriction: Option<String>,
+    pub staking_weights: Option<Vec<StakingWeight>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]

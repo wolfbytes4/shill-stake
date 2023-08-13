@@ -23,6 +23,13 @@ pub struct RewardsContractInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct StakingWeight {
+    pub amount: Uint128,
+    pub weight_trait_type: String,
+    pub weight_percentage: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecuteMsg {
     AddContract {
@@ -55,7 +62,8 @@ pub struct StakedInfoResponse {
     pub staking_contract: ContractInfo,
     pub reward_contract: RewardsContractInfo,
     pub total_rewards: Uint128,
-    pub trait_restriction: Option<String>
+    pub trait_restriction: Option<String>,
+    pub staking_weights: Option<Vec<StakingWeight>>
 }
 
 #[derive(Serialize)]
