@@ -26,10 +26,10 @@ pub struct State {
     pub owner: Addr,
     pub is_active: bool,
     pub staking_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
+    pub reward_contracts: Vec<RewardsContractInfo>,
     pub viewing_key: Option<String>,
     pub total_staked_amount: Uint128,
-    pub total_rewards: Uint128,
+    // pub total_rewards: Uint128,
     pub trait_restriction: Option<String>,
     pub staking_weights: Option<Vec<StakingWeight>>,
 }

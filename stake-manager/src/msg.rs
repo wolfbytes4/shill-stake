@@ -20,6 +20,7 @@ pub struct RewardsContractInfo {
     pub address: Addr,
     pub rewards_per_day: Uint128,
     pub name: String,
+    pub total_rewards: Option<Uint128>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -60,10 +61,12 @@ pub struct ContractsWithInfoResponse {
 pub struct StakedInfoResponse {
     pub total_staked_amount: Uint128,
     pub staking_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
-    pub total_rewards: Uint128,
+    pub reward_contract: Option<RewardsContractInfo>,
+    pub reward_contracts: Option<Vec<RewardsContractInfo>>,
+    pub total_rewards: Option<Uint128>,
     pub trait_restriction: Option<String>,
-    pub staking_weights: Option<Vec<StakingWeight>>
+    pub staking_weights: Option<Vec<StakingWeight>>,
+    pub is_active: Option<bool>
 }
 
 #[derive(Serialize)]

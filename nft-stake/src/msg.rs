@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct InstantiateMsg {
     pub entropy: String,
     pub staking_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
+    //pub reward_contract: RewardsContractInfo,
+    pub reward_contracts: Vec<RewardsContractInfo>,
     pub trait_restriction: Option<String>,
     pub staking_weights: Option<Vec<StakingWeight>>,
 }
@@ -26,6 +27,7 @@ pub struct RewardsContractInfo {
     pub address: Addr,
     pub rewards_per_day: Uint128,
     pub name: String,
+    pub total_rewards: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -83,7 +85,7 @@ pub enum ExecuteMsg {
     },
     ClaimRewards {},
     UpdateRewardContract {
-        contract: RewardsContractInfo,
+        contracts: Vec<RewardsContractInfo>,
     },
     RemoveRewards {},
     SetViewingKey {
@@ -127,14 +129,22 @@ pub enum QueryMsg {
 pub struct StakedInfoResponse {
     pub total_staked_amount: Uint128,
     pub staking_contract: ContractInfo,
-    pub reward_contract: RewardsContractInfo,
-    pub total_rewards: Uint128,
+    //pub reward_contract: RewardsContractInfo,
+    pub reward_contracts: Option<Vec<RewardsContractInfo>>,
+    //pub total_rewards: Uint128,
     pub trait_restriction: Option<String>,
     pub staking_weights: Option<Vec<StakingWeight>>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct MyStakedInfoResponse {
     pub staked: Staked,
+    pub estimated_rewards: Vec<EstimatedReward>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct EstimatedReward {
     pub estimated_rewards: Uint128,
+    pub reward_contract_name: String,
 }

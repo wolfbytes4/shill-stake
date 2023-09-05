@@ -1,7 +1,7 @@
 use crate::error::ContractError;
 use crate::msg::{
-    ExecuteMsg, HandleReceiveMsg, History, InstantiateMsg, MyStakedInfoResponse, QueryMsg,
-    RewardsContractInfo, Staked, StakedInfoResponse, StakingWeight, UserStakingWeight,
+    EstimatedReward, ExecuteMsg, HandleReceiveMsg, History, InstantiateMsg, MyStakedInfoResponse,
+    QueryMsg, RewardsContractInfo, Staked, StakedInfoResponse, StakingWeight, UserStakingWeight,
 };
 use crate::rand::sha_256;
 use crate::state::{
@@ -39,12 +39,11 @@ pub fn instantiate(
         viewing_key: Some(viewing_key),
         owner: info.sender.clone(),
         staking_contract: msg.staking_contract,
-        reward_contract: msg.reward_contract,
-        total_staked_amount: Uint128::from(0u128),
-        total_rewards: Uint128::from(0u128),
+        reward_contracts: msg.reward_contracts,
         is_active: true,
         trait_restriction: msg.trait_restriction,
         staking_weights: msg.staking_weights,
+        total_staked_amount: Uint128::from(0u128),
     };
 
     //Save Contract state
@@ -74,13 +73,15 @@ pub fn instantiate(
         state.staking_contract.address.to_string(),
     )?);
 
-    response_msgs.push(set_viewing_key_msg(
-        vk.to_string(),
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash.to_string(),
-        state.reward_contract.address.to_string(),
-    )?);
+    for reward_contract in state.reward_contracts.iter() {
+        response_msgs.push(set_viewing_key_msg(
+            vk.to_string(),
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?);
+    }
 
     Ok(Response::new().add_messages(response_msgs))
 }
@@ -96,8 +97,8 @@ pub fn execute(
         ExecuteMsg::RevokePermit { permit_name } => {
             try_revoke_permit(deps, &info.sender, &permit_name)
         }
-        ExecuteMsg::UpdateRewardContract { contract } => {
-            try_update_reward_contract(deps, &info.sender, contract)
+        ExecuteMsg::UpdateRewardContract { contracts } => {
+            try_update_reward_contract(deps, &info.sender, contracts)
         }
         ExecuteMsg::RemoveRewards {} => try_remove_rewards(deps, &info.sender),
         ExecuteMsg::BatchReceiveNft {
@@ -140,13 +141,18 @@ fn receive(
     if let Some(bin_msg) = msg {
         match from_binary(&bin_msg)? {
             HandleReceiveMsg::ReceiveRewards {} => {
-                if info_sender != &state.reward_contract.address {
+                let reward_contract_index = state
+                    .reward_contracts
+                    .iter()
+                    .position(|x| x.address == info_sender.to_string());
+                if reward_contract_index.is_none() {
                     return Err(ContractError::CustomError {
                         val: info_sender.to_string()
                             + &" Address is not correct reward snip contract".to_string(),
                     });
                 }
-                state.total_rewards += amount;
+                let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
+                reward_contract.total_rewards += amount;
 
                 CONFIG_ITEM.save(deps.storage, &state)?;
             }
@@ -287,29 +293,38 @@ fn try_batch_receive(
 
     let current_time = _env.block.time.seconds();
     let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
+    for rewards in rewards_to_claim.iter() {
+        let reward_contract_index = state
+            .reward_contracts
+            .iter()
+            .position(|x| x.name == rewards.reward_contract_name.to_string());
+        let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
 
-    if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
-        //claim rewards
-        staked.last_claimed_date = Some(current_time);
-        let claim_history: History = {
-            History {
-                amount: rewards_to_claim,
-                date: current_time,
-                action: "claim".to_string(),
-            }
-        };
+        if rewards.estimated_rewards > Uint128::from(0u128)
+            && rewards.estimated_rewards < reward_contract.total_rewards
+        {
+            //claim rewards
+            staked.last_claimed_date = Some(current_time);
+            let claim_history: History = {
+                History {
+                    amount: rewards.estimated_rewards,
+                    date: current_time,
+                    action: "claim".to_string(),
+                }
+            };
 
-        history_store.push(deps.storage, &claim_history)?;
-        response_msgs.push(transfer_msg(
-            from.to_string(),
-            rewards_to_claim,
-            None,
-            None,
-            BLOCK_SIZE,
-            state.reward_contract.code_hash.to_string(),
-            state.reward_contract.address.to_string(),
-        )?);
-        state.total_rewards -= rewards_to_claim;
+            history_store.push(deps.storage, &claim_history)?;
+            response_msgs.push(transfer_msg(
+                from.to_string(),
+                rewards.estimated_rewards,
+                None,
+                None,
+                BLOCK_SIZE,
+                reward_contract.code_hash.to_string(),
+                reward_contract.address.to_string(),
+            )?);
+            reward_contract.total_rewards -= rewards.estimated_rewards;
+        }
     }
 
     state.total_staked_amount += Uint128::from(token_ids.len() as u128);
@@ -390,27 +405,38 @@ fn try_withdraw_with_quantity(
 
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
     let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
-    if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
-        //claim rewards
-        let claim_history: History = {
-            History {
-                amount: rewards_to_claim,
-                date: current_time,
-                action: "claim".to_string(),
-            }
-        };
 
-        history_store.push(deps.storage, &claim_history)?;
-        response_msgs.push(transfer_msg(
-            info_sender.to_string(),
-            rewards_to_claim,
-            None,
-            None,
-            BLOCK_SIZE,
-            state.reward_contract.code_hash.to_string(),
-            state.reward_contract.address.to_string(),
-        )?);
-        state.total_rewards -= rewards_to_claim;
+    for rewards in rewards_to_claim.iter() {
+        let reward_contract_index = state
+            .reward_contracts
+            .iter()
+            .position(|x| x.name == rewards.reward_contract_name.to_string());
+        let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
+
+        if rewards.estimated_rewards > Uint128::from(0u128)
+            && rewards.estimated_rewards < reward_contract.total_rewards
+        {
+            //claim rewards
+            let claim_history: History = {
+                History {
+                    amount: rewards.estimated_rewards,
+                    date: current_time,
+                    action: "claim".to_string(),
+                }
+            };
+
+            history_store.push(deps.storage, &claim_history)?;
+            response_msgs.push(transfer_msg(
+                info_sender.to_string(),
+                rewards.estimated_rewards,
+                None,
+                None,
+                BLOCK_SIZE,
+                reward_contract.code_hash.to_string(),
+                reward_contract.address.to_string(),
+            )?);
+            reward_contract.total_rewards -= rewards.estimated_rewards;
+        }
     }
     //QUANTITY LOGIC
     let staked_nfts_leftover = staked_nfts.split_off(quantity.u128() as usize);
@@ -470,6 +496,8 @@ fn try_withdraw(deps: DepsMut, _env: Env, info_sender: &Addr) -> Result<Response
     let mut state = CONFIG_ITEM.load(deps.storage)?;
     let history_store = HISTORY_STORE.add_suffix(info_sender.to_string().as_bytes());
     let current_time = _env.block.time.seconds();
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
+
     let staked = STAKED_STORE
         .get(
             deps.storage,
@@ -498,48 +526,55 @@ fn try_withdraw(deps: DepsMut, _env: Env, info_sender: &Addr) -> Result<Response
 
     let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
 
-    if state.staking_weights.is_some() {
-        for weight in state.staking_weights.as_mut().unwrap().iter_mut() {
-            let user_staking_weight = staked
-                .staking_weights
-                .as_ref()
-                .unwrap()
-                .iter()
-                .find(|x| x.weight_trait_type == weight.weight_trait_type);
-            if user_staking_weight.is_none() {
-                return Err(ContractError::CustomError {
-                    val: "Can't find matching user weight".to_string(),
-                });
-            }
+    for rewards in rewards_to_claim.iter() {
+        let reward_contract_index = state
+            .reward_contracts
+            .iter()
+            .position(|x| x.name == rewards.reward_contract_name.to_string());
+        let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
 
-            weight.amount -= user_staking_weight.unwrap().amount;
+        if state.staking_weights.is_some() {
+            for weight in state.staking_weights.as_mut().unwrap().iter_mut() {
+                let user_staking_weight = staked
+                    .staking_weights
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|x| x.weight_trait_type == weight.weight_trait_type);
+                if user_staking_weight.is_none() {
+                    return Err(ContractError::CustomError {
+                        val: "Can't find matching user weight".to_string(),
+                    });
+                }
+
+                weight.amount -= user_staking_weight.unwrap().amount;
+            }
         }
-    }
 
-    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
-    let current_time = _env.block.time.seconds();
+        if rewards.estimated_rewards > Uint128::from(0u128)
+            && rewards.estimated_rewards < reward_contract.total_rewards
+        {
+            //claim rewards
+            let claim_history: History = {
+                History {
+                    amount: rewards.estimated_rewards,
+                    date: current_time,
+                    action: "claim".to_string(),
+                }
+            };
 
-    if rewards_to_claim > Uint128::from(0u128) && rewards_to_claim < state.total_rewards {
-        //claim rewards
-        let claim_history: History = {
-            History {
-                amount: rewards_to_claim,
-                date: current_time,
-                action: "claim".to_string(),
-            }
-        };
-
-        history_store.push(deps.storage, &claim_history)?;
-        response_msgs.push(transfer_msg(
-            info_sender.to_string(),
-            rewards_to_claim,
-            None,
-            None,
-            BLOCK_SIZE,
-            state.reward_contract.code_hash.to_string(),
-            state.reward_contract.address.to_string(),
-        )?);
-        state.total_rewards -= rewards_to_claim;
+            history_store.push(deps.storage, &claim_history)?;
+            response_msgs.push(transfer_msg(
+                info_sender.to_string(),
+                rewards.estimated_rewards,
+                None,
+                None,
+                BLOCK_SIZE,
+                reward_contract.code_hash.to_string(),
+                reward_contract.address.to_string(),
+            )?);
+            reward_contract.total_rewards -= rewards.estimated_rewards;
+        }
     }
 
     state.total_staked_amount -= staked.staked_amount;
@@ -694,43 +729,51 @@ fn try_claim_rewards(
     let mut response_msgs: Vec<CosmosMsg> = Vec::new();
     let current_time = _env.block.time.seconds();
     let rewards_to_claim = get_estimated_rewards(&staked, &current_time, &state)?;
-    if rewards_to_claim > Uint128::from(0u128) {
-        if state.total_rewards < rewards_to_claim {
+    for rewards in rewards_to_claim.iter() {
+        let reward_contract_index = state
+            .reward_contracts
+            .iter()
+            .position(|x| x.name == rewards.reward_contract_name.to_string());
+        let reward_contract = &mut state.reward_contracts[reward_contract_index.unwrap()];
+
+        if rewards.estimated_rewards > Uint128::from(0u128) {
+            if reward_contract.total_rewards < rewards.estimated_rewards {
+                return Err(ContractError::CustomError {
+                    val: "Error trying to claim rewards".to_string(),
+                });
+            }
+            let claim_history: History = {
+                History {
+                    amount: rewards.estimated_rewards,
+                    date: current_time,
+                    action: "claim".to_string(),
+                }
+            };
+
+            history_store.push(deps.storage, &claim_history)?;
+            response_msgs.push(transfer_msg(
+                info_sender.to_string(),
+                rewards.estimated_rewards,
+                None,
+                None,
+                BLOCK_SIZE,
+                reward_contract.code_hash.to_string(),
+                reward_contract.address.to_string(),
+            )?);
+            staked.last_claimed_date = Some(current_time);
+            reward_contract.total_rewards -= rewards.estimated_rewards;
+            STAKED_STORE.insert(
+                deps.storage,
+                &deps.api.addr_canonicalize(&info_sender.to_string())?,
+                &staked,
+            )?;
+            CONFIG_ITEM.save(deps.storage, &state)?;
+        } else {
+            //this technically should never happen
             return Err(ContractError::CustomError {
-                val: "Error trying to claim rewards".to_string(),
+                val: "Not allowed to claim yet".to_string(),
             });
         }
-        let claim_history: History = {
-            History {
-                amount: rewards_to_claim,
-                date: current_time,
-                action: "claim".to_string(),
-            }
-        };
-
-        history_store.push(deps.storage, &claim_history)?;
-        response_msgs.push(transfer_msg(
-            info_sender.to_string(),
-            rewards_to_claim,
-            None,
-            None,
-            BLOCK_SIZE,
-            state.reward_contract.code_hash.to_string(),
-            state.reward_contract.address.to_string(),
-        )?);
-        staked.last_claimed_date = Some(current_time);
-        state.total_rewards -= rewards_to_claim;
-        STAKED_STORE.insert(
-            deps.storage,
-            &deps.api.addr_canonicalize(&info_sender.to_string())?,
-            &staked,
-        )?;
-        CONFIG_ITEM.save(deps.storage, &state)?;
-    } else {
-        //this technically should never happen
-        return Err(ContractError::CustomError {
-            val: "Not allowed to claim yet".to_string(),
-        });
     }
 
     Ok(Response::new().add_messages(response_msgs))
@@ -754,9 +797,10 @@ fn try_revoke_permit(
 fn try_update_reward_contract(
     deps: DepsMut,
     sender: &Addr,
-    contract: RewardsContractInfo,
+    contracts: Vec<RewardsContractInfo>,
 ) -> Result<Response, ContractError> {
     let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
 
     if sender.clone() != state.owner {
         return Err(ContractError::CustomError {
@@ -764,25 +808,33 @@ fn try_update_reward_contract(
         });
     }
 
-    if state.total_rewards != Uint128::from(0u128) {
-        return Err(ContractError::CustomError {
-            val: "Clear out rewards first before updating".to_string(),
-        });
+    for reward_contract in state.reward_contracts.iter() {
+        if reward_contract.total_rewards != Uint128::from(0u128) {
+            return Err(ContractError::CustomError {
+                val: "Clear out rewards first before updating".to_string(),
+            });
+        }
     }
 
-    state.reward_contract = contract;
+    for reward_contract in state.reward_contracts.iter() {
+        response_msgs.push(set_viewing_key_msg(
+            state.viewing_key.clone().unwrap().to_string(),
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?);
+    }
+
+    state.reward_contracts = contracts;
     CONFIG_ITEM.save(deps.storage, &state)?;
-    Ok(Response::new().add_message(set_viewing_key_msg(
-        state.viewing_key.unwrap().to_string(),
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash,
-        state.reward_contract.address.to_string(),
-    )?))
+
+    Ok(Response::new().add_messages(response_msgs))
 }
 
 fn try_remove_rewards(deps: DepsMut, sender: &Addr) -> Result<Response, ContractError> {
     let mut state = CONFIG_ITEM.load(deps.storage)?;
+    let mut response_msgs: Vec<CosmosMsg> = Vec::new();
 
     if sender.clone() != state.owner {
         return Err(ContractError::CustomError {
@@ -790,19 +842,23 @@ fn try_remove_rewards(deps: DepsMut, sender: &Addr) -> Result<Response, Contract
         });
     }
 
-    let cosmos_msg = transfer_msg(
-        sender.to_string(),
-        state.total_rewards.clone(),
-        None,
-        None,
-        BLOCK_SIZE,
-        state.reward_contract.code_hash.to_string(),
-        state.reward_contract.address.to_string(),
-    )?;
+    for reward_contract in state.reward_contracts.iter_mut() {
+        let cosmos_msg = transfer_msg(
+            sender.to_string(),
+            reward_contract.total_rewards.clone(),
+            None,
+            None,
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        )?;
+        response_msgs.push(cosmos_msg);
 
-    state.total_rewards = Uint128::from(0u128);
+        reward_contract.total_rewards = Uint128::from(0u128);
+    }
+
     CONFIG_ITEM.save(deps.storage, &state)?;
-    Ok(Response::new().add_message(cosmos_msg))
+    Ok(Response::new().add_messages(response_msgs))
 }
 
 pub fn try_set_viewing_key(
@@ -929,66 +985,82 @@ pub fn try_eject(
     Ok(Response::new().add_messages(response_msgs))
 }
 
-fn get_estimated_rewards(staked: &Staked, current_time: &u64, state: &State) -> StdResult<Uint128> {
-    let mut estimated_rewards = Uint128::from(0u128);
-    //estimate logic for a normal weighting
-    if state.staking_weights.is_none()
-        && staked.staked_amount > Uint128::from(0u128)
-        && state.total_staked_amount > Uint128::from(0u128)
-    {
-        let date = if staked.last_claimed_date.is_some() {
-            staked.last_claimed_date.unwrap()
-        } else {
-            staked.last_staked_date.unwrap()
-        };
+fn get_estimated_rewards(
+    staked: &Staked,
+    current_time: &u64,
+    state: &State,
+) -> StdResult<Vec<EstimatedReward>> {
+    let mut expected_rewards: Vec<EstimatedReward> = Vec::new();
 
-        let user_reward_percentage =
-            Decimal::from_ratio(staked.staked_amount, state.total_staked_amount);
-        let elapsed_seconds = current_time - date;
-        let rewards_per_second =
-            Decimal::from_ratio(state.reward_contract.rewards_per_day, 24u64 * 60u64 * 60u64);
-        let est_rewards = user_reward_percentage
-            * rewards_per_second
-            * Decimal::from_atomics(elapsed_seconds, 0).unwrap();
+    for reward_contract in state.reward_contracts.iter() {
+        let mut estimated_rewards = Uint128::from(0u128);
+        //estimate logic for a normal weighting
+        if state.staking_weights.is_none()
+            && staked.staked_amount > Uint128::from(0u128)
+            && state.total_staked_amount > Uint128::from(0u128)
+        {
+            let date = if staked.last_claimed_date.is_some() {
+                staked.last_claimed_date.unwrap()
+            } else {
+                staked.last_staked_date.unwrap()
+            };
 
-        let without_decimals = Decimal::from(
-            est_rewards * Decimal::from_ratio(1u128, 10u128.pow(est_rewards.decimal_places())),
-        );
-        estimated_rewards = without_decimals.atomics();
-    }
-    //estimate logic for when there are weights defined by the nft traits
-    else if state.staking_weights.is_some() && staked.staked_amount > Uint128::from(0u128) {
-        let date = if staked.last_claimed_date.is_some() {
-            staked.last_claimed_date.unwrap()
-        } else {
-            staked.last_staked_date.unwrap()
-        };
-
-        let elapsed_seconds = current_time - date;
-        for weight in state.staking_weights.as_ref().unwrap().iter() {
-            let user_weight = staked
-                .staking_weights
-                .as_ref()
-                .unwrap()
-                .iter()
-                .find(|&x| x.weight_trait_type == weight.weight_trait_type.to_string());
             let user_reward_percentage =
-                Decimal::from_ratio(user_weight.unwrap().amount, weight.amount);
+                Decimal::from_ratio(staked.staked_amount, state.total_staked_amount);
+            let elapsed_seconds = current_time - date;
             let rewards_per_second =
-                Decimal::from_ratio(state.reward_contract.rewards_per_day, 24u64 * 60u64 * 60u64);
-            let percent_of_rps =
-                rewards_per_second * Decimal::percent(weight.weight_percentage.u128() as u64);
+                Decimal::from_ratio(reward_contract.rewards_per_day, 24u64 * 60u64 * 60u64);
             let est_rewards = user_reward_percentage
-                * percent_of_rps
+                * rewards_per_second
                 * Decimal::from_atomics(elapsed_seconds, 0).unwrap();
+
             let without_decimals = Decimal::from(
                 est_rewards * Decimal::from_ratio(1u128, 10u128.pow(est_rewards.decimal_places())),
             );
-            estimated_rewards = estimated_rewards + without_decimals.atomics();
+            estimated_rewards = without_decimals.atomics();
         }
-    }
+        //estimate logic for when there are weights defined by the nft traits
+        else if state.staking_weights.is_some() && staked.staked_amount > Uint128::from(0u128) {
+            let date = if staked.last_claimed_date.is_some() {
+                staked.last_claimed_date.unwrap()
+            } else {
+                staked.last_staked_date.unwrap()
+            };
 
-    return Ok(estimated_rewards);
+            let elapsed_seconds = current_time - date;
+            for weight in state.staking_weights.as_ref().unwrap().iter() {
+                let user_weight = staked
+                    .staking_weights
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .find(|&x| x.weight_trait_type == weight.weight_trait_type.to_string());
+                let user_reward_percentage =
+                    Decimal::from_ratio(user_weight.unwrap().amount, weight.amount);
+                let rewards_per_second =
+                    Decimal::from_ratio(reward_contract.rewards_per_day, 24u64 * 60u64 * 60u64);
+                let percent_of_rps =
+                    rewards_per_second * Decimal::percent(weight.weight_percentage.u128() as u64);
+                let est_rewards = user_reward_percentage
+                    * percent_of_rps
+                    * Decimal::from_atomics(elapsed_seconds, 0).unwrap();
+                let without_decimals = Decimal::from(
+                    est_rewards
+                        * Decimal::from_ratio(1u128, 10u128.pow(est_rewards.decimal_places())),
+                );
+                estimated_rewards = estimated_rewards + without_decimals.atomics();
+            }
+        }
+
+        let estimated_reward: EstimatedReward = {
+            EstimatedReward {
+                estimated_rewards: estimated_rewards,
+                reward_contract_name: reward_contract.name.to_string(),
+            }
+        };
+        expected_rewards.push(estimated_reward);
+    }
+    return Ok(expected_rewards);
 }
 
 #[entry_point]
@@ -1019,11 +1091,12 @@ fn query_staked(deps: Deps) -> StdResult<StakedInfoResponse> {
     let state = CONFIG_ITEM.load(deps.storage)?;
     Ok(StakedInfoResponse {
         total_staked_amount: state.total_staked_amount,
-        total_rewards: state.total_rewards,
+        // total_rewards: state.total_rewards,
         staking_contract: state.staking_contract,
-        reward_contract: state.reward_contract,
+        reward_contracts: Some(state.reward_contracts),
         trait_restriction: state.trait_restriction,
         staking_weights: state.staking_weights,
+        is_active: Some(state.is_active),
     })
 }
 
@@ -1066,18 +1139,23 @@ fn query_user_history(
     Ok(history)
 }
 
-fn query_reward_balance(deps: Deps, env: Env, viewer: ViewerInfo) -> StdResult<Balance> {
+fn query_reward_balance(deps: Deps, env: Env, viewer: ViewerInfo) -> StdResult<Vec<Balance>> {
     check_admin_key(deps, viewer)?;
+
     let state = CONFIG_ITEM.load(deps.storage)?;
-    let balance = balance_query(
-        deps.querier,
-        env.contract.address.to_string(),
-        state.viewing_key.unwrap(),
-        BLOCK_SIZE,
-        state.reward_contract.code_hash,
-        state.reward_contract.address.to_string(),
-    );
-    Ok(balance.unwrap())
+    let mut balances: Vec<Balance> = Vec::new();
+    for reward_contract in state.reward_contracts.iter() {
+        let balance = balance_query(
+            deps.querier,
+            env.contract.address.to_string(),
+            state.viewing_key.clone().unwrap(),
+            BLOCK_SIZE,
+            reward_contract.code_hash.to_string(),
+            reward_contract.address.to_string(),
+        );
+        balances.push(balance.unwrap())
+    }
+    Ok(balances)
 }
 
 fn query_staked_balance(deps: Deps, env: Env, viewer: ViewerInfo) -> StdResult<Balance> {
@@ -1161,28 +1239,28 @@ mod tests {
                         stake_type: "".to_string(),
                     }
                 },
-                reward_contract: {
+                reward_contracts: vec![{
                     RewardsContractInfo {
                         code_hash: "".to_string(),
                         address: Addr::unchecked(""),
                         rewards_per_day: Uint128::from(2739000000u128),
-                        name: "".to_string(),
+                        name: "".to_string(), 
+                        total_rewards: Uint128::from(10000000000000u128)
                     }
-                },
+                }],
                 viewing_key: None,
                 total_staked_amount: Uint128::from(200u128),
-                total_rewards: Uint128::from(10000000000000u128),
                 staking_weights: None,
                 trait_restriction: None,
             }
         };
         let x = get_estimated_rewards(&staked, &current_time, &state);
-        assert_eq!(x.unwrap(), expected);
+        assert_eq!(x.unwrap()[0].estimated_rewards, expected);
 
         staked.staked_amount = Uint128::from(100u128);
         expected = Uint128::from(1369499999u128);
         let y = get_estimated_rewards(&staked, &current_time, &state);
-        assert_eq!(y.unwrap(), expected);
+        assert_eq!(y.unwrap()[0].estimated_rewards, expected);
 
         //test weights
         state.staking_weights = Some(vec![
@@ -1212,7 +1290,7 @@ mod tests {
         ]);
         let z = get_estimated_rewards(&staked, &current_time, &state);
         expected = Uint128::from(1141249998u128);
-        assert_eq!(z.unwrap(), expected);
+        assert_eq!(z.unwrap()[0].estimated_rewards, expected);
     }
 
     // #[test]
@@ -1283,14 +1361,15 @@ mod tests {
                     stake_type: "".to_string(),
                 }
             },
-            reward_contract: {
+            reward_contracts: vec![{
                 RewardsContractInfo {
                     code_hash: "".to_string(),
                     address: Addr::unchecked(""),
                     rewards_per_day: Uint128::from(2739000000u128),
                     name: "".to_string(),
+                    total_rewards: Uint128::from(10000000000000u128),
                 }
-            },
+            }],
             trait_restriction: Some("Alpha".to_string()),
             staking_weights: Some(vec![
                 StakingWeight {
