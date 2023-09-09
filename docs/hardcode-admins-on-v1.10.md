@@ -20,7 +20,7 @@ If this proposal passes, the list of contracts that will be hardcoded into the v
 | secret1klssqs6ws59frztrnxndnvksh6v9ftyd0hyud9 | ShillStake (Boonanas)         |     | 1027            |                     | Add multiple rewards          | secret1ght5566c9w3kdck90ywx9ky247nay98cc0qt0g | Shillables Team    |
 | secret1xlzwfuqwpasppsmtuna2k3mak69cwkc0pkyl6r | ShillStake (Alphacas)         |     | 1027            |                     | Add multiple rewards          | secret1ght5566c9w3kdck90ywx9ky247nay98cc0qt0g | Shillables Team    |
 | secret10u4stpj7qpl3va2s94e03legaeqczdlhjvgc3f | ShillStake (Wolf Pack Alphas) |     | 1048            |                     | Add multiple rewards          | secret1ght5566c9w3kdck90ywx9ky247nay98cc0qt0g | Shillables Team    |
-| secret197dvnt9yjxwn8sjdlx05f7zuk27lsdxtfnwxse | SHILL SNIP-25                 |     | 958             |                     | Add MetaMask permits & decoys | secret1ght5566c9w3kdck90ywx9ky247nay98cc0qt0g | Shillables Team    |
+| secret197dvnt9yjxwn8sjdlx05f7zuk27lsdxtfnwxse | SHILL SNIP-25                 |     | 958             |                     | Add MetaMask permits & decoys | secret1xs48sc9deeqwqx80semzgl09ualegevnyylppq | Shillables Team    |
 | secret16majzwc2q9sgy7ufcfmn5vnmes88l34nj78f7m | Wolf Pack PackBuilder         |     | 1019            |                     | Add/Remove payment methods    | secret1ght5566c9w3kdck90ywx9ky247nay98cc0qt0g | Shillables Team    |
 
 ## Key Takeaways
